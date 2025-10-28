@@ -1,20 +1,14 @@
-import asyncio
-import json
+import os
 import logging
+import requests
+import json
+import re
+from urllib.parse import urljoin, urlparse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
-import requests
-import time
-import re
 
-# বট টোকেন
-BOT_TOKEN = "8292852232:AAGk47XqZKocBTT3je-gco0NOPUr1I3TrC0"
+# Railway environment variable
+BOT_TOKEN = os.environ.get('BOT_TOKEN', '8292852232:AAGk47XqZKocBTT3je-gco0NOPUr1I3TrC0')
 
 # লগিং সেটআপ
 logging.basicConfig(
@@ -23,315 +17,270 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-class APICaptureBot:
+class StableAPICaptureBot:
     def __init__(self):
-        self.user_sessions = {}
-        self.drivers = {}
-        
+        self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+        })
+    
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         user = update.effective_user
         
         welcome_text = f"""
-🔍 **Advanced API Capture Bot**
+🔍 **API Capture Bot**
 
 Welcome {user.first_name}!
 
-I can capture APIs from any website automatically.
+I can help you discover APIs from websites.
 
 **How to Use:**
-1. Send website URL
-2. I'll analyze and capture all APIs
-3. Get complete API documentation
+1. Send any website URL
+2. I'll analyze it for APIs
+3. Get discovered endpoints
 
-**Supported Sites:**
-• IVASMS
-• Any SMS Gateway
-• Payment Gateways  
-• Social Media APIs
-• Custom Websites
+**Example URLs:**
+• https://ivasms.com
+• https://jsonplaceholder.typicode.com
+• https://api.github.com
 
-**Features:**
-✅ Automatic API Discovery
-✅ Request/Response Capture
-✅ Parameter Extraction
-✅ Ready-to-use Code
+**Commands:**
+/start - Start bot
+/capture - Capture APIs from URL  
+/examples - Show examples
+/help - Get help
         """
         
         keyboard = [
             [InlineKeyboardButton("🌐 Capture APIs", callback_data="capture_apis")],
             [InlineKeyboardButton("📋 Examples", callback_data="show_examples")],
-            [InlineKeyboardButton("🆘 Help", callback_data="help")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(welcome_text, reply_markup=reply_markup)
     
-    async def handle_capture_request(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """API capture request handle"""
+    async def capture_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Capture APIs command"""
         await update.message.reply_text(
             "🌐 **Send Website URL**\n\n"
-            "Please send the website URL you want to capture APIs from:\n\n"
-            "📋 **Examples:**\n"
+            "Please send the website URL you want to analyze:\n\n"
+            "Examples:\n"
             "• https://ivasms.com\n"
-            "• https://panel.ivasms.com\n"
-            "• https://any-website.com\n\n"
-            "⚠️ Make sure the site is accessible and has API functionality."
+            "• https://api.github.com\n"
+            "• https://jsonplaceholder.typicode.com\n\n"
+            "I'll discover any available APIs."
         )
     
-    async def handle_url_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle URL input and start API capture"""
-        url = update.message.text.strip()
-        user_id = update.effective_user.id
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle incoming messages"""
+        text = update.message.text.strip()
         
-        # URL validation
-        if not self.is_valid_url(url):
+        # Check if it's a URL
+        if self.is_valid_url(text):
+            await self.process_url(update, text)
+        else:
             await update.message.reply_text(
-                "❌ Invalid URL!\n\n"
-                "Please send a valid URL starting with http:// or https://\n\n"
+                "❌ Please send a valid URL starting with http:// or https://\n\n"
                 "Example: https://ivasms.com"
             )
-            return
-        
-        # Start capture process
-        processing_msg = await update.message.reply_text(
-            f"🔄 Starting API capture for:\n{url}\n\n"
-            "This may take 1-2 minutes..."
-        )
+    
+    async def process_url(self, update: Update, url: str):
+        """Process URL and discover APIs"""
+        processing_msg = await update.message.reply_text(f"🔍 Analyzing {url}...")
         
         try:
-            # Capture APIs
-            api_data = await self.capture_apis_from_url(url, user_id)
+            # Discover APIs
+            results = await self.discover_apis(url)
             
-            if api_data:
-                await self.send_api_results(update, api_data, url)
+            if results['success']:
+                await self.send_results(update, results, url)
             else:
                 await update.message.reply_text(
-                    "❌ No APIs found!\n\n"
-                    "Possible reasons:\n"
-                    "• Site uses heavy JavaScript\n"
-                    "• APIs are hidden/encrypted\n"
-                    "• Site requires login\n"
-                    "• Try a different URL"
+                    f"❌ Could not analyze {url}\n\n"
+                    f"Error: {results['error']}\n\n"
+                    "Please check the URL and try again."
                 )
                 
         except Exception as e:
-            logger.error(f"API capture error: {e}")
+            logger.error(f"Error processing URL: {e}")
             await update.message.reply_text(
-                f"❌ Capture failed: {str(e)}\n\n"
-                "Please try again or contact support."
+                "❌ An error occurred while processing the URL.\n"
+                "Please try again later."
             )
         
+        # Delete processing message
         try:
             await processing_msg.delete()
         except:
             pass
     
-    async def capture_apis_from_url(self, url: str, user_id: int) -> dict:
-        """Capture APIs from given URL using Selenium"""
-        driver = None
+    async def discover_apis(self, url: str) -> dict:
+        """Discover APIs from URL"""
         try:
-            # Setup Chrome with logging enabled
-            chrome_options = Options()
-            chrome_options.add_argument("--headless")  # Remove for debugging
-            chrome_options.add_argument("--no-sandbox")
-            chrome_options.add_argument("--disable-dev-shm-usage")
-            chrome_options.add_argument("--remote-debugging-port=9222")
+            # Fetch the webpage
+            response = self.session.get(url, timeout=15, verify=False)
+            response.raise_for_status()
             
-            # Enable performance logging
-            caps = DesiredCapabilities.CHROME
-            caps['goog:loggingPrefs'] = {'performance': 'ALL'}
+            endpoints = []
             
-            driver = webdriver.Chrome(options=chrome_options, desired_capabilities=caps)
-            self.drivers[user_id] = driver
+            # Method 1: Find API endpoints in HTML
+            html_endpoints = self.find_in_html(response.text, url)
+            endpoints.extend(html_endpoints)
             
-            # Navigate to URL
-            driver.get(url)
+            # Method 2: Check common API paths
+            common_endpoints = self.check_common_paths(url)
+            endpoints.extend(common_endpoints)
             
-            # Wait for page load
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.TAG_NAME, "body"))
-            )
+            # Remove duplicates
+            unique_endpoints = []
+            seen = set()
+            for endpoint in endpoints:
+                if endpoint['url'] not in seen:
+                    unique_endpoints.append(endpoint)
+                    seen.add(endpoint['url'])
             
-            # Capture initial network requests
-            initial_logs = self.get_network_logs(driver)
+            return {
+                'success': True,
+                'endpoints': unique_endpoints,
+                'total': len(unique_endpoints)
+            }
             
-            # Try to find and click common elements to trigger APIs
-            self.interact_with_page(driver)
-            
-            # Wait for additional requests
-            time.sleep(5)
-            
-            # Capture final network requests
-            final_logs = self.get_network_logs(driver)
-            
-            # Combine and analyze logs
-            all_logs = initial_logs + final_logs
-            api_data = self.analyze_network_logs(all_logs, url)
-            
-            return api_data
-            
+        except requests.exceptions.RequestException as e:
+            return {
+                'success': False,
+                'error': f"Network error: {str(e)}"
+            }
         except Exception as e:
-            logger.error(f"Selenium error: {e}")
-            return {}
-        finally:
-            if driver:
-                driver.quit()
-                if user_id in self.drivers:
-                    del self.drivers[user_id]
+            return {
+                'success': False,
+                'error': f"Analysis error: {str(e)}"
+            }
     
-    def get_network_logs(self, driver):
-        """Get network logs from browser"""
-        try:
-            logs = driver.get_log('performance')
-            return logs
-        except:
-            return []
-    
-    def interact_with_page(self, driver):
-        """Interact with page to trigger API calls"""
-        try:
-            # Try to find and click buttons that might trigger APIs
-            click_selectors = [
-                "button",
-                "a[href*='api']",
-                "input[type='submit']",
-                ".btn",
-                "[onclick*='ajax']",
-                "[data-action*='api']"
-            ]
-            
-            for selector in click_selectors:
-                try:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    for element in elements[:2]:  # Click first 2 elements
-                        try:
-                            element.click()
-                            time.sleep(1)
-                        except:
-                            continue
-                except:
-                    continue
-                    
-        except Exception as e:
-            logger.error(f"Page interaction error: {e}")
-    
-    def analyze_network_logs(self, logs, base_url):
-        """Analyze network logs and extract API information"""
-        api_endpoints = []
+    def find_in_html(self, html: str, base_url: str) -> list:
+        """Find API endpoints in HTML content"""
+        endpoints = []
         
-        for log in logs:
-            try:
-                log_message = json.loads(log['message'])
-                message = log_message.get('message', {})
+        # Patterns to search for in HTML
+        patterns = [
+            r'["\'](/api/v\d+/[^"\']*)["\']',
+            r'["\'](/api/[^"\']*)["\']',
+            r'["\'](/v\d+/[^"\']*)["\']',
+            r'["\'](https?://[^"\']*?/api/[^"\']*)["\']',
+            r'["\'](https?://[^"\']*?/v\d+/[^"\']*)["\']',
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, html, re.IGNORECASE)
+            for match in matches:
+                if match.startswith('http'):
+                    full_url = match
+                else:
+                    full_url = urljoin(base_url, match)
                 
-                if message.get('method') == 'Network.requestWillBeSent':
-                    request = message.get('params', {}).get('request', {})
-                    url = request.get('url', '')
-                    
-                    # Filter API-like URLs
-                    if self.is_api_url(url, base_url):
-                        api_info = {
-                            'url': url,
-                            'method': request.get('method'),
-                            'headers': request.get('headers', {}),
-                            'post_data': request.get('postData'),
-                            'timestamp': log.get('timestamp')
-                        }
-                        api_endpoints.append(api_info)
-                        
-            except Exception as e:
-                continue
+                endpoints.append({
+                    'url': full_url,
+                    'method': 'GET',
+                    'source': 'HTML'
+                })
         
-        # Remove duplicates
-        unique_apis = []
-        seen_urls = set()
-        
-        for api in api_endpoints:
-            if api['url'] not in seen_urls:
-                unique_apis.append(api)
-                seen_urls.add(api['url'])
-        
-        return {
-            'base_url': base_url,
-            'apis_found': len(unique_apis),
-            'endpoints': unique_apis
-        }
+        return endpoints
     
-    def is_api_url(self, url, base_url):
-        """Check if URL looks like an API endpoint"""
-        api_indicators = [
-            '/api/', '/v1/', '/v2/', '/v3/', '/json', '/xml',
-            '/sms', '/send', '/otp', '/verify', '/auth',
-            'api.', 'gateway.', 'rest.', 'graphql'
+    def check_common_paths(self, base_url: str) -> list:
+        """Check common API paths"""
+        common_paths = [
+            '/api/v1/send-sms',
+            '/api/v2/send-sms', 
+            '/api/v3/send-sms',
+            '/api/send-sms',
+            '/api/sms/send',
+            '/api/otp/send',
+            '/api/verify',
+            '/api/check-balance',
+            '/api/balance',
+            '/api/users',
+            '/api/data',
+            '/api/info',
+            '/v1/users',
+            '/v2/users',
+            '/v1/data',
+            '/v2/data',
         ]
         
-        # Exclude common non-API URLs
-        exclude_patterns = [
-            '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.ico',
-            'fonts.', 'analytics', 'google', 'facebook', 'twitter'
-        ]
+        endpoints = []
+        for path in common_paths:
+            full_url = urljoin(base_url, path)
+            endpoints.append({
+                'url': full_url,
+                'method': 'GET/POST',
+                'source': 'Common path'
+            })
         
-        url_lower = url.lower()
-        base_domain = self.extract_domain(base_url)
-        
-        # Check if it's from the same domain and contains API indicators
-        if base_domain in url_lower:
-            if any(indicator in url_lower for indicator in api_indicators):
-                if not any(pattern in url_lower for pattern in exclude_patterns):
-                    return True
-        
-        return False
+        return endpoints
     
-    def extract_domain(self, url):
-        """Extract domain from URL"""
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
-        return parsed.netloc
-    
-    def is_valid_url(self, url):
+    def is_valid_url(self, url: str) -> bool:
         """Validate URL format"""
-        import re
-        pattern = re.compile(
-            r'^(https?://)'  # http:// or https://
-            r'([a-zA-Z0-9.-]+)'  # domain
-            r'(\.[a-zA-Z]{2,})'  # top-level domain
-            r'(:\d+)?'  # port
-            r'(/.*)?$'  # path
-        )
-        return pattern.match(url) is not None
+        try:
+            result = urlparse(url)
+            return all([result.scheme, result.netloc])
+        except:
+            return False
     
-    async def send_api_results(self, update: Update, api_data: dict, original_url: str):
-        """Send captured API results to user"""
-        if not api_data.get('endpoints'):
-            await update.message.reply_text("❌ No APIs found on this site.")
+    async def send_results(self, update: Update, results: dict, original_url: str):
+        """Send discovery results to user"""
+        endpoints = results['endpoints']
+        
+        if not endpoints:
+            await update.message.reply_text(
+                f"🔍 **Analysis Complete**\n\n"
+                f"🌐 URL: {original_url}\n"
+                f"📊 APIs Found: 0\n\n"
+                f"No API endpoints discovered.\n"
+                f"Try a different URL or check the website manually."
+            )
             return
         
         # Send summary
-        summary_text = f"""
-🔍 **API Capture Results**
+        summary = f"""
+🔍 **Analysis Complete**
 
-🌐 **Website:** {original_url}
-📊 **APIs Found:** {api_data['apis_found']}
+🌐 URL: {original_url}
+📊 APIs Found: {results['total']}
 
-📋 **Discovered Endpoints:**
+**Discovered Endpoints:**
 """
         
-        for i, endpoint in enumerate(api_data['endpoints'][:10], 1):  # Show first 10
-            summary_text += f"\n{i}. `{endpoint['method']} {endpoint['url']}`"
+        for i, endpoint in enumerate(endpoints[:8], 1):
+            summary += f"\n{i}. `{endpoint['url']}`"
+            summary += f"\n   Method: {endpoint['method']} | Source: {endpoint['source']}"
         
-        if api_data['apis_found'] > 10:
-            summary_text += f"\n\n... and {api_data['apis_found'] - 10} more endpoints"
+        if len(endpoints) > 8:
+            summary += f"\n\n... and {len(endpoints) - 8} more endpoints"
         
-        await update.message.reply_text(summary_text)
+        await update.message.reply_text(summary)
         
-        # Send detailed information for each endpoint
-        for i, endpoint in enumerate(api_data['endpoints'][:5], 1):  # Details for first 5
-            endpoint_text = f"""
-🔧 **Endpoint {i}**
+        # Send usage example
+        if endpoints:
+            example = self.generate_example(endpoints[0])
+            await update.message.reply_text(example)
+    
+    def generate_example(self, endpoint: dict) -> str:
+        """Generate Python code example"""
+        return f"""
+🐍 **Usage Example:**
 
-🔗 **URL:** `{endpoint['url']}`
-📡 **Method:** `{endpoint['method']}`
+```python
+import requests
 
-📝 **Headers:**
-```json
-{json.dumps(endpoint['headers'], indent=2)}
+# Test the discovered API
+url = "{endpoint['url']}"
+
+try:
+    response = requests.get(url, timeout=10)
+    print(f"Status: {{response.status_code}}")
+    print(f"Response: {{response.text}}")
+except Exception as e:
+    print(f"Error: {{e}}")
